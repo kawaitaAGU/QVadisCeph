@@ -1,11 +1,4 @@
-# z01_2.py _pinch_stable.py — minimal patch for reliable iPhone pinch + stable drag
-# 変更点（今回追加したのは ★ の CSS だけ）:
-# - (#) viewport を user-scalable=yes に（保険）
-# - (#) .ceph-wrapper に overscroll-behavior: contain
-# - (#) #ceph-stage の touch-action: pinch-zoom → auto
-# - (#) タッチは setPointerCapture を使わず、2本指以上はドラッグ無効
-# - (#) releasePointerCapture の event 参照バグ修正（pointerId保持）
-# - (★) .ceph-marker / .ceph-marker * に touch-action:none を追加（マーカー上でのスクロール禁止）
+# z01_2.py _pinch_stable.py — iPhone対応: 三角ドラッグ中はスクロールしない & 2本指ピンチは温存
 
 import json
 import streamlit as st
@@ -74,7 +67,7 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
     <style>
       .ceph-wrapper{
         position:relative;width:min(100%,960px);margin:0 auto;
-        overscroll-behavior: contain; /* ラバーバンド軽減 */
+        overscroll-behavior: contain;
       }
       #ceph-image{
         width:100%;height:auto;display:block;
@@ -84,7 +77,7 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
       #ceph-overlay{position:absolute;inset:0;pointer-events:none;z-index:2;}
       #ceph-stage{
         position:absolute;inset:0;pointer-events:auto;z-index:3;
-        touch-action:auto;    /* pinch-zoom をブラウザに任せる */
+        touch-action:auto;
         -webkit-user-select:none;user-select:none;
       }
       #angle-stack{
@@ -113,7 +106,7 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
       .std-hline{stroke:#ffffff;stroke-width:1.1;}
       .std-patient{stroke:#ef4444;stroke-width:2;fill:none;}
 
-      /* ★ ここだけ今回追加：マーカー上でのスクロール / ピンチを禁止 */
+      /* マーカー上ではスクロールもピンチもさせない（JS側でドラッグ専用） */
       .ceph-marker{
         position:absolute;
         transform:translate(-50%,0);
@@ -123,7 +116,6 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
       .ceph-marker *{
         touch-action:none;
       }
-      /* ここまで ★ */
 
       .ceph-marker.dragging{cursor:grabbing;}
       .ceph-marker .pin{width:0;height:0;margin:0 auto;}
@@ -132,34 +124,6 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
         text-shadow:0 1px 2px rgba(0,0,0,.6);text-align:center;
       }
     </style>
-
-    <!-- viewport をズーム許可に（保険） -->
-    <script>
-      (function(){
-        try{
-          let m=document.querySelector('meta[name="viewport"]');
-          const c='width=device-width, initial-scale=1, maximum-scale=5, user-scalable=yes';
-          if(m) m.setAttribute('content',c);
-          else{
-            m=document.createElement('meta');
-            m.name='viewport';
-            m.content=c;
-            document.head.appendChild(m);
-          }
-        }catch(e){}
-      })();
-    </script>
-
-    <div class="ceph-wrapper">
-      <img id="ceph-image" src="__IMAGE_DATA_URL__" alt="cephalometric background"/>
-      <svg id="ceph-planes"></svg>
-      <svg id="ceph-overlay"></svg>
-      <div id="ceph-stage"></div>
-      <div id="angle-stack">
-        __ANGLE_ROWS_HTML__
-        <div id="coord-stack"></div>
-      </div>
-    </div>
 
     <script>
       const ANGLE_CONFIG = __ANGLE_CONFIG_JSON__;
@@ -191,19 +155,11 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
         let activeMarker = null;
         let dragOffset   = {x:0,y:0};
 
-        // アクティブ pointer（2本指以上ならドラッグ無効）
         const activePointers = new Set();
         let capturedPointerId = null;
 
         const clamp=(v,lo,hi)=>Math.min(Math.max(v,lo),hi);
         const xy = m => (!m?null:{x:parseFloat(m.dataset.left||"0"), y:parseFloat(m.dataset.top||"0")});
-
-        function syncAngleStackScale(){
-          const base = ANGLE_STACK_BASE_WIDTH || 900;
-          const w = image.clientWidth || base;
-          const scale = Math.min(1, w / base);
-          angleStack.style.transform = 'scale(' + scale + ')';
-        }
 
         const computeAngle=(pairA,pairB)=>{
           const a1=markerById[pairA[0]], a2=markerById[pairA[1]],
@@ -256,7 +212,6 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
           }).join("");
         }
 
-        // ===== markers (thin triangles) =====
         function setPosition(m,left,top){
           const w=stage.clientWidth||1,h=stage.clientHeight||1;
           const cl=Math.round(clamp(left,0,w));
@@ -300,11 +255,10 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
           markers.push(m);
 
           m.addEventListener("pointerdown",(ev)=>{
-            // touch 2本以上 → ピンチ優先（ドラッグ開始しない）
             if (ev.pointerType === "touch") {
               activePointers.add(ev.pointerId);
-              if (activePointers.size >= 2) return;
-              capturedPointerId = null;
+              if (activePointers.size >= 2) return;  // 2本指ならピンチ優先
+              capturedPointerId = None;
             } else if (ev.pointerType === "mouse") {
               m.setPointerCapture?.(ev.pointerId);
               capturedPointerId = ev.pointerId;
@@ -321,9 +275,13 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
             m.classList.add("dragging");
           }, {passive:true});
 
+          // ★ ここが今回の本命修正: passive:false + preventDefault()
           m.addEventListener("pointermove",(ev)=>{
-            if (activePointers.size >= 2) return;  // ピンチ中
+            if (activePointers.size >= 2) return;  // ピンチ中はドラッグさせない
             if(activeMarker!==m) return;
+            if (ev.pointerType === "touch") {
+              ev.preventDefault();   // ← ここで縦スクロールを完全に止める
+            }
             const rect=stage.getBoundingClientRect();
             setPosition(
               m,
@@ -331,7 +289,7 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
               ev.clientY-rect.top -dragOffset.y
             );
             updatePlanes(); updateAngleStack(); redrawPolygon(); updateCoordStack();
-          }, {passive:true});
+          }, {passive:false});  // ★ ここ
 
           const finish=(ev)=>{
             if (ev?.pointerType === "touch") {
@@ -370,7 +328,6 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
           });
         }
 
-        // ===== planes =====
         function initPlanes(){
           planesSvg.innerHTML="";
           planeLines.length=0;
@@ -405,7 +362,6 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
           });
         }
 
-        // ===== polygon =====
         function measureRowCentersMap(){
           const wrapRect = wrapper.getBoundingClientRect();
           const map = new Map();
@@ -437,7 +393,7 @@ def render_ceph_component(image_data_url: str, marker_size: int, show_labels: bo
             if(ys[i]==null){
               let prev=null,next=null;
               for(let p=i-1;p>=0;p--){ if(ys[p]!=null){ prev=ys[p]; break; } }
-              for(let n=i+1;n<ys.length;n++){ if(ys[n]!=null){ next=ys[n]; break; } }
+              for(let n=i+1;n<POLYGON_ROWS.length;n++){ if(ys[n]!=null){ next=ys[n]; break; } }
               if(prev!=null && next!=null) ys[i]=(prev+next)/2;
               else if(prev!=null) ys[i]=prev+40;
               else if(next!=null) ys[i]=next-40;
@@ -612,13 +568,10 @@ def slim_main() -> None:
         st.error("表示画像をuploadしてください。")
         return
 
-    marker_size = 26
-    show_labels = True
-
     component_value = render_ceph_component(
         image_data_url=image_data_url,
-        marker_size=marker_size,
-        show_labels=show_labels,
+        marker_size=26,
+        show_labels=True,
         point_state=st.session_state.ceph_points,
     )
 
